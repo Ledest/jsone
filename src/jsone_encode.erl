@@ -78,45 +78,46 @@
 %% Exported Functions
 %%--------------------------------------------------------------------------------
 -spec encode(jsone:json_value()) -> encode_result().
-encode(Value) ->
-    encode(Value, []).
+encode(Value) -> encode(Value, []).
 
 -spec encode(jsone:json_value(), [jsone:encode_option()]) -> encode_result().
-encode(Value, Options) ->
-    Opt = parse_options(Options),
-    value(Value, [], <<"">>, Opt).
+encode(Value, Options) -> value(Value, [], [], parse_options(Options)).
 
 %%--------------------------------------------------------------------------------
 %% Internal Functions
 %%--------------------------------------------------------------------------------
 -spec next([next()], binary(), opt()) -> encode_result().
-next([], Buf, _)                       -> {ok, Buf};
+next([], Buf, _)                       -> {ok, list_to_binary(lists:reverse(Buf))};
 next(Level = [Next | Nexts], Buf, Opt) ->
     case Next of
         {array_values, Values} ->
-            case Values of
-                [] -> array_values(Values, Nexts, Buf, Opt);
-                _  -> array_values(Values, Nexts, pp_newline_or_space(<<Buf/binary, $,>>, Level, Opt), Opt)
-            end;
+            array_values(Values, Nexts,
+                         if
+                             Values =:= [] -> Buf;
+                             true -> pp_newline_or_space([$,|Buf], Level, Opt)
+                         end,
+                         Opt);
         {object_value, Value, Members} ->
-            object_value(Value, Members, Nexts, pp_space(<<Buf/binary, $:>>, Opt), Opt);
+            object_value(Value, Members, Nexts, pp_space([$:|Buf], Opt), Opt);
         {object_members, Members} ->
-            case Members of
-                [] -> object_members(Members, Nexts, Buf, Opt);
-                _  -> object_members(Members, Nexts, pp_newline_or_space(<<Buf/binary, $,>>, Level, Opt), Opt)
-            end;
+            object_members(Members, Nexts,
+                           if
+                               Members =:= [] -> Buf;
+                               true -> pp_newline_or_space([$,|Buf], Level, Opt)
+                           end,
+                           Opt);
         {char, C} ->
-            next(Nexts, <<Buf/binary, C>>, Opt)
+            next(Nexts, [C|Buf], Opt)
     end.
 
 -spec value(jsone:json_value(), [next()], binary(), opt()) -> encode_result().
-value(null, Nexts, Buf, Opt)                         -> next(Nexts, <<Buf/binary, "null">>, Opt);
-value(undefined, Nexts, Buf, Opt = ?OPT{undefined_as_null = true}) -> next(Nexts, <<Buf/binary, "null">>, Opt);
-value(false, Nexts, Buf, Opt)                        -> next(Nexts, <<Buf/binary, "false">>, Opt);
-value(true, Nexts, Buf, Opt)                         -> next(Nexts, <<Buf/binary, "true">>, Opt);
+value(null, Nexts, Buf, Opt)                         -> next(Nexts, [<<"null">>|Buf], Opt);
+value(undefined, Nexts, Buf, Opt = ?OPT{undefined_as_null = true}) -> next(Nexts, [<<"null">>|Buf], Opt);
+value(false, Nexts, Buf, Opt)                        -> next(Nexts, [<<"false">>|Buf], Opt);
+value(true, Nexts, Buf, Opt)                         -> next(Nexts, [<<"true">>|Buf], Opt);
 value({{json, T}}, Nexts, Buf, Opt) ->
     try
-        next(Nexts, <<Buf/binary, (iolist_to_binary(T))/binary>>, Opt)
+        next(Nexts, [iolist_to_binary(T)|Buf], Opt)
     catch
          error:badarg ->
             ?ERROR(value, [{json, T}, Nexts, Buf, Opt])
@@ -126,13 +127,13 @@ value({{json_utf8, T}}, Nexts, Buf, Opt) ->
         {error, OK, Invalid} ->
             {error, {{invalid_json_utf8, OK, Invalid}, [{?MODULE, value, [{json_utf8, T}, Nexts, Buf, Opt], [{line, ?LINE}]}]}};
         B when is_binary(B) ->
-            next(Nexts, <<Buf/binary, B/binary>>, Opt)
+            next(Nexts, [B|Buf], Opt)
     catch
         error:badarg ->
             ?ERROR(value, [{json_utf8, T}, Nexts, Buf, Opt])
     end;
-value(Value, Nexts, Buf, Opt) when is_integer(Value) -> next(Nexts, <<Buf/binary, (integer_to_binary(Value))/binary>>, Opt);
-value(Value, Nexts, Buf, Opt) when is_float(Value)   -> next(Nexts, <<Buf/binary, (float_to_binary(Value, Opt?OPT.float_format))/binary>>, Opt);
+value(Value, Nexts, Buf, Opt) when is_integer(Value) -> next(Nexts, [integer_to_binary(Value)|Buf], Opt);
+value(Value, Nexts, Buf, Opt) when is_float(Value)   -> next(Nexts, [float_to_binary(Value, Opt?OPT.float_format)|Buf], Opt);
 value(Value, Nexts, Buf, Opt) when ?IS_STR(Value)    -> string(Value, Nexts, Buf, Opt);
 value({{_,_,_},{_,_,_}} = Value, Nexts, Buf, Opt)    -> datetime(Value, Nexts, Buf, Opt);
 value({Value}, Nexts, Buf, Opt)                      -> object(Value, Nexts, Buf, Opt);
@@ -145,18 +146,15 @@ value(Value, Nexts, Buf, Opt)                        -> ?ERROR(value, [Value, Ne
 
 -spec string(jsone:json_string(), [next()], binary(), opt()) -> encode_result().
 string(<<Str/binary>>, Nexts, Buf, Opt) ->
-    escape_string(Str, Nexts, <<Buf/binary, $">>, Opt);
+    escape_string(Str, Nexts, [$"|Buf], Opt);
 string(Str, Nexts, Buf, Opt) ->
     string(atom_to_binary(Str, utf8), Nexts, Buf, Opt).
 
 -spec datetime(calendar:datetime(), [next()], binary(), opt()) -> encode_result().
 datetime({{Y,M,D}, {H,Mi,S}}, Nexts, Buf, Opt) when ?IS_DATETIME(Y,M,D,H,Mi,S) ->
     {iso8601, Tz} = Opt?OPT.datetime_format,
-    Str =
-    [format_year(Y), $-, format2digit(M), $-, format2digit(D), $T,
-     format2digit(H), $:, format2digit(Mi), $:, format_seconds(S),
-     format_tz(Tz)],
-    next(Nexts, <<Buf/binary, $", (list_to_binary(Str))/binary, $">>, Opt);
+    next(Nexts, [$", format_tz(Tz), format_seconds(S), $:, format2digit(Mi), $:, format2digit(H), $T,
+                 format2digit(D), $-, format2digit(M), $-, format_year(Y), $"|Buf], Opt);
 datetime(Datetime, Nexts, Buf, Opt) ->
     ?ERROR(datetime, [Datetime, Nexts, Buf, Opt]).
 
@@ -167,7 +165,7 @@ datetime(Datetime, Nexts, Buf, Opt) ->
 format_year(Y) when Y > 999 -> integer_to_binary(Y);
 format_year(Y) ->
     B = integer_to_binary(Y),
-    [lists:duplicate(4-byte_size(B), $0)|B].
+    [lists:duplicate(4 - byte_size(B), $0)|B].
 
 -spec format2digit(non_neg_integer()) -> iolist().
 format2digit(0) -> "00";
@@ -188,27 +186,27 @@ format_seconds(S) when is_float(S) -> io_lib:format("~6.3.0f", [S]).
 
 -spec format_tz(integer()) -> byte() | iolist().
 format_tz(0) -> $Z;
-format_tz(Tz) when Tz > 0 -> [$+|format_tz_(Tz)];
-format_tz(Tz) -> [$-|format_tz_(-Tz)].
+format_tz(Tz) ->
+    [if
+         Tz > 0 -> $+;
+         true -> $-
+     end|format_tz_(abs(Tz))].
 
 -define(SECONDS_PER_MINUTE, 60).
 -define(SECONDS_PER_HOUR, 3600).
 -spec format_tz_(integer()) -> iolist().
 format_tz_(S) ->
-    H = S div ?SECONDS_PER_HOUR,
-    S1 = S rem ?SECONDS_PER_HOUR,
-    M = S1 div ?SECONDS_PER_MINUTE,
-    [format2digit(H), $:, format2digit(M)].
+    [format2digit(S div ?SECONDS_PER_HOUR), $:, format2digit((S rem ?SECONDS_PER_HOUR) div ?SECONDS_PER_MINUTE)].
 
 -spec object_key(jsone:json_value(), [next()], binary(), opt()) -> encode_result().
 object_key(Key, Nexts, Buf, Opt) when ?IS_STR(Key) ->
     string(Key, Nexts, Buf, Opt);
 object_key(Key, Nexts, Buf, Opt = ?OPT{object_key_type = scalar}) when is_number(Key) ->
-    value(Key, [{char, $"} | Nexts], <<Buf/binary, $">>, Opt);
+    value(Key, [{char, $"} | Nexts], [$"|Buf], Opt);
 object_key(Key = {{Y,M,D},{H,Mi,S}}, Nexts, Buf, Opt = ?OPT{object_key_type = Type}) when ?IS_DATETIME(Y,M,D,H,Mi,S), Type =/= string ->
     value(Key, Nexts, Buf, Opt);
 object_key(Key, Nexts, Buf, Opt = ?OPT{object_key_type = value}) ->
-    case value(Key, [], <<>>, Opt) of
+    case value(Key, [], [], Opt) of
         {error, Reason} -> {error, Reason};
         {ok, BinaryKey} -> string(BinaryKey, Nexts, Buf, Opt)
     end;
@@ -221,41 +219,43 @@ object_key(Key, Nexts, Buf, Opt) ->
 -ifdef(ENABLE_HIPE).
 -define(COPY_UTF8,
 escape_string(<<2#110:3, C1:5, C2, Str/binary>>, Nexts, Buf, Opt) ->
-    escape_string(Str, Nexts, <<Buf/binary, (2#11000000+C1), C2>>, Opt);
+    escape_string(Str, Nexts, [<<(2#11000000 + C1), C2>>|Buf], Opt);
 escape_string(<<2#1110:4, C1:4, C2:16, Str/binary>>, Nexts, Buf, Opt) ->
-    escape_string(Str, Nexts, <<Buf/binary, (2#11100000+C1), C2:16>>, Opt);
+    escape_string(Str, Nexts, [<<(2#11100000 + C1), C2:16>>|Buf], Opt);
 escape_string(<<2#11110:5, C1:3, C2:24, Str/binary>>, Nexts, Buf, Opt) ->
-    escape_string(Str, Nexts, <<Buf/binary, (2#11110000+C1), C2:24>>, Opt)
+    escape_string(Str, Nexts, [<<(2#11110000 + C1), C2:24>>|Buf], Opt)
     ).
 -else.
 -define(COPY_UTF8,
 escape_string(<<Ch/utf8, Str/binary>>, Nexts, Buf, Opt) ->
-    escape_string(Str, Nexts, <<Buf/binary, Ch/utf8>>, Opt)
+    escape_string(Str, Nexts, [<<Ch/utf8>>|Buf], Opt)
     ).
 -endif.
 
 -spec escape_string(binary(), [next()], binary(), opt()) -> encode_result().
-escape_string(<<"">>,                   Nexts, Buf, Opt) -> next(Nexts, <<Buf/binary, $">>, Opt);
-escape_string(<<$", Str/binary>>,       Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $">>, Opt);
-escape_string(<<$\/, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $\/>>, Opt);
-escape_string(<<$\\, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $\\>>, Opt);
-escape_string(<<$\b, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $b>>, Opt);
-escape_string(<<$\f, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $f>>, Opt);
-escape_string(<<$\n, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $n>>, Opt);
-escape_string(<<$\r, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $r>>, Opt);
-escape_string(<<$\t, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, <<Buf/binary, $\\, $t>>, Opt);
+escape_string(<<>>,                     Nexts, Buf, Opt) -> next(Nexts, [$"|Buf], Opt);
+escape_string(<<$", Str/binary>>,       Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$", $\\|Buf], Opt);
+escape_string(<<$\/, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$/, $\\|Buf], Opt);
+escape_string(<<$\\, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$\\, $\\|Buf], Opt);
+escape_string(<<$\b, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$b, $\\|Buf], Opt);
+escape_string(<<$\f, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$f, $\\|Buf], Opt);
+escape_string(<<$\n, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$n, $\\|Buf], Opt);
+escape_string(<<$\r, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$r, $\\|Buf], Opt);
+escape_string(<<$\t, Str/binary>>,      Nexts, Buf, Opt) -> escape_string(Str, Nexts, [$t, $\\|Buf], Opt);
 escape_string(<<0:1, C:7, Str/binary>>, Nexts, Buf, Opt) ->
-    case C < 16#20 of
-        true  -> escape_string(Str, Nexts, <<Buf/binary, "\\u00", ?H8(C)>>, Opt);
-        false -> escape_string(Str, Nexts, <<Buf/binary, C>>, Opt)
-    end;
+    escape_string(Str, Nexts,
+                  [if
+                       C < 16#20 -> <<"\\u00", ?H8(C)>>;
+                       true -> C
+                   end|Buf],
+                  Opt);
 escape_string(<<Ch/utf8, Str/binary>>,  Nexts, Buf, Opt = ?OPT{native_utf8 = false}) ->
-    NewBuf = if
-                 Ch =< 16#FFFF -> <<Buf/binary, $\\, $u, ?H16(Ch)>>;
-                 true ->
-                     <<H1, H2, L1, L2>> = <<Ch/utf16>>,
-                     <<Buf/binary, $\\, $u, ?H8(H1), ?H8(H2), $\\, $u, ?H8(L1), ?H8(L2)>>
-             end,
+    NewBuf = [if
+                  Ch =< 16#FFFF -> <<$\\, $u, ?H16(Ch)>>;
+                  true ->
+                      <<H1, H2, L1, L2>> = <<Ch/utf16>>,
+                      <<$\\, $u, ?H8(H1), ?H8(H2), $\\, $u, ?H8(L1), ?H8(L2)>>
+              end|Buf],
     escape_string(Str, Nexts, NewBuf, Opt);
 ?COPY_UTF8;
 escape_string(Str, Nexts, Buf, Opt) ->
@@ -302,20 +302,20 @@ hex(X) ->
 
 -spec array(jsone:json_array(), [next()], binary(), opt()) -> encode_result().
 array(List, Nexts, Buf, Opt) ->
-    array_values(List, Nexts, pp_newline(<<Buf/binary, $[>>, Nexts, 1, Opt), Opt).
+    array_values(List, Nexts, pp_newline([$[|Buf], Nexts, 1, Opt), Opt).
 
 -spec array_values(jsone:json_array(), [next()], binary(), opt()) -> encode_result().
-array_values([],       Nexts, Buf, Opt) -> next(Nexts, <<(pp_newline(Buf, Nexts, Opt))/binary, $]>>, Opt);
+array_values([],       Nexts, Buf, Opt) -> next(Nexts, [$]|pp_newline(Buf, Nexts, Opt)], Opt);
 array_values([X | Xs], Nexts, Buf, Opt) -> value(X, [{array_values, Xs} | Nexts], Buf, Opt).
 
 -spec object(jsone:json_object_members(), [next()], binary(), opt()) -> encode_result().
 object(Members, Nexts, Buf, ?OPT{canonical_form = true}=Opt) ->
-  object_members(lists:sort(Members), Nexts, pp_newline(<<Buf/binary, ${>>, Nexts, 1, Opt), Opt);
+  object_members(lists:sort(Members), Nexts, pp_newline([${|Buf], Nexts, 1, Opt), Opt);
 object(Members, Nexts, Buf, Opt) ->
-    object_members(Members, Nexts, pp_newline(<<Buf/binary, ${>>, Nexts, 1, Opt), Opt).
+    object_members(Members, Nexts, pp_newline([${|Buf], Nexts, 1, Opt), Opt).
 
 -spec object_members(jsone:json_object_members(), [next()], binary(), opt()) -> encode_result().
-object_members([],                  Nexts, Buf, Opt) -> next(Nexts, <<(pp_newline(Buf, Nexts, Opt))/binary, $}>>, Opt);
+object_members([],                  Nexts, Buf, Opt) -> next(Nexts, [$}|pp_newline(Buf, Nexts, Opt)], Opt);
 object_members([{Key, Value} | Xs], Nexts, Buf, Opt) -> object_key(Key, [{object_value, Value, Xs} | Nexts], Buf, Opt);
 object_members(Arg, Nexts, Buf, Opt)                 -> ?ERROR(object_members, [Arg, Nexts, Buf, Opt]).
 
@@ -331,7 +331,7 @@ pp_newline(Buf, Level, Opt) -> pp_newline(Buf, Level, 0, Opt).
 
 -spec pp_newline(binary(), list(), non_neg_integer(), opt()) -> binary().
 pp_newline(Buf, _, _,     ?OPT{indent = 0}) -> Buf;
-pp_newline(Buf, L, Extra, ?OPT{indent = N}) -> padding(<<Buf/binary, $\n>>, Extra * N + length(L) * N).
+pp_newline(Buf, L, Extra, ?OPT{indent = N}) -> padding([$\n|Buf], Extra * N + length(L) * N).
 
 -spec pp_newline_or_space(binary(), list(), opt()) -> binary().
 pp_newline_or_space(Buf, _, Opt = ?OPT{indent = 0}) -> pp_space(Buf, Opt);
@@ -339,15 +339,7 @@ pp_newline_or_space(Buf, L, Opt)                    -> pp_newline(Buf, L, Opt).
 
 -spec padding(binary(), non_neg_integer()) -> binary().
 padding(Buf, 0) -> Buf;
-padding(Buf, 1) -> <<Buf/binary, " ">>;
-padding(Buf, 2) -> <<Buf/binary, "  ">>;
-padding(Buf, 3) -> <<Buf/binary, "   ">>;
-padding(Buf, 4) -> <<Buf/binary, "    ">>;
-padding(Buf, 5) -> <<Buf/binary, "     ">>;
-padding(Buf, 6) -> <<Buf/binary, "      ">>;
-padding(Buf, 7) -> <<Buf/binary, "       ">>;
-padding(Buf, 8) -> <<Buf/binary, "        ">>;
-padding(Buf, N) -> padding(<<Buf/binary, "         ">>, N - 9).
+padding(Buf, N) -> padding([$\s|Buf], N - 1).
 
 -spec parse_options([jsone:encode_option()]) -> opt().
 parse_options(Options) ->
